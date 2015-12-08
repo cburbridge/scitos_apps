@@ -6,6 +6,8 @@ from std_srvs.srv import Empty, EmptyResponse
 from sensor_msgs.msg import JointState
 import math
 import threading
+import numpy as np
+import copy
 
 SOFT_PAN_LIMIT_UPPER = 1.9
 SOFT_PAN_LIMIT_LOWER = -1.9
@@ -15,7 +17,7 @@ MAX_PAN_VEL = 2
 MIN_PAN_VEL = -2
 MAX_TILT_VEL = 2
 MIN_TILT_VEL = -2
-PAN_ACCEL=1
+PAN_ACCEL=1000
 TILT_ACCEL=1
 
 class FollowFrame(object):
@@ -73,14 +75,39 @@ class FollowFrame(object):
     
     def _main_loop(self):
         rater = rospy.Rate(self._follow_frequency)
+        pan_target = 0
         while self._running:
+            current =copy.deepcopy(self._ptu_state)
             t = self._tf.getLatestCommonTime("/ptu_mount", self._target_frame)
+            try:
+                self._tf.waitForTransform("/ptu_mount",
+                                          self._target_frame,
+                                          current.header.stamp,
+                                          timeout=rospy.Duration(0.5))
+            except:
+                continue
             position, quaternion = self._tf.lookupTransform("/ptu_mount",
                                                            self._target_frame,
-                                                           t)
-
-            yaw = math.atan2(position[1], position[0])
+                                                           current.header.stamp )
             roll = math.atan2(position[2], position[0])
+
+            position_p, quaternion_p = self._tf.lookupTransform("/ptu_pan_motor",
+                                                           self._target_frame,
+                                                           current.header.stamp )
+            pan_target = math.atan2(position_p[1], position_p[0])
+            tilt_target = -math.atan2(position_p[2], position_p[0])
+            print "Tilt=",tilt_target
+            print "Pan=",pan_target
+            #roll = tilt_target - current.position[1]
+
+            # Remove the tilt from the position before calculating yaw
+            #angles = tf.transformations.euler_from_quaternion(quaternion)
+            #remove_ptu = tf.transformations.rotation_matrix(current.position[1],[0,1,0])
+            #position = [position[0],position[1],position[2],1]
+            #position = np.dot(remove_ptu, position)
+            #yaw = math.atan2(position[1], position[0])
+            yaw = pan_target - current.position[0]
+
             print "=> drive yaw=", yaw
             print "=> drive roll=", roll
 
@@ -89,11 +116,25 @@ class FollowFrame(object):
                 continue
 
             # If the yaw angle would pass the back, flip it
-            new_pan=self._ptu_state.position[0] + yaw
-            if new_pan < -math.pi:
+            new_pan = current.position[0] + yaw
+            # How much to allow over turn, to dismiss problems when near the -pi/pi boundry
+            # Over turn will be stopped later
+            FLIP_PERMIT = math.pi/8.0   
+            #print "Will go to ", new_pan, "; yaw is ", yaw
+            if new_pan < -math.pi-FLIP_PERMIT:
                 yaw=2*math.pi-yaw
-            if new_pan > math.pi:
+                #print "Cocked because smaller than -pi"
+            if new_pan > math.pi+FLIP_PERMIT:
                 yaw=-2*math.pi+yaw
+                #print "Cocked by bigger than pi"
+
+            new_pan=current.position[0] + yaw
+            # If the new pan angle is outside the limits then restrict yaw to be inside
+            if new_pan < SOFT_PAN_LIMIT_LOWER:
+                yaw = SOFT_PAN_LIMIT_LOWER - current.position[0]
+            elif new_pan > SOFT_PAN_LIMIT_UPPER:
+                yaw = SOFT_PAN_LIMIT_UPPER - current.position[0]
+            
 
             self._cmd_state.velocity[0] = yaw
             self._cmd_state.velocity[0] = min(self._cmd_state.velocity[0], MAX_PAN_VEL)
@@ -101,13 +142,13 @@ class FollowFrame(object):
             self._cmd_state.velocity[1] = -roll
             self._cmd_state.velocity[1] = min(self._cmd_state.velocity[1], MAX_TILT_VEL)
             self._cmd_state.velocity[1] = max(self._cmd_state.velocity[1], MIN_TILT_VEL)
-
+            print "Vel=",self._cmd_state.velocity[1]
 
             # Check the acceleration limits
-            if self._cmd_state.velocity[0] - self._last_cmd_vel[0] < - PAN_ACCEL:
-                self._cmd_state.velocity[0] = self._last_cmd_vel[0] - PAN_ACCEL
-            if self._cmd_state.velocity[0] - self._last_cmd_vel[0] > PAN_ACCEL:
-                self._cmd_state.velocity[0] = self._last_cmd_vel[0] + PAN_ACCEL
+            if self._follow_frequency*(self._cmd_state.velocity[0] - self._last_cmd_vel[0]) < - PAN_ACCEL:
+                self._cmd_state.velocity[0] = self._last_cmd_vel[0] - PAN_ACCEL/float(self._follow_frequency)
+            if self._follow_frequency*(self._cmd_state.velocity[0] - self._last_cmd_vel[0]) > PAN_ACCEL:
+                self._cmd_state.velocity[0] = self._last_cmd_vel[0] + PAN_ACCEL/float(self._follow_frequency)
             if self._cmd_state.velocity[1] - self._last_cmd_vel[1] < - TILT_ACCEL:
                 self._cmd_state.velocity[1] = self._last_cmd_vel[1] - TILT_ACCEL
             if self._cmd_state.velocity[1] - self._last_cmd_vel[1] > TILT_ACCEL:
@@ -123,6 +164,8 @@ class FollowFrame(object):
                 self._cmd_state.velocity[1] = min(0, self._cmd_state.velocity[1])
             if (self._ptu_state.position[1] < SOFT_TILT_LIMIT_LOWER):
                 self._cmd_state.velocity[1] = max(0, self._cmd_state.velocity[1])
+
+            print "Vel=",self._cmd_state.velocity[1]
 
             self._ptu_cmd.publish(self._cmd_state)
             self._last_cmd_vel[0]=self._cmd_state.velocity[0]
