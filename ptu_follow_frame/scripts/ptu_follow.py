@@ -119,12 +119,12 @@ class FollowFrame(object):
             new_pan = current.position[0] + yaw
             # How much to allow over turn, to dismiss problems when near the -pi/pi boundry
             # Over turn will be stopped later
-            FLIP_PERMIT = math.pi/8.0   
+            #FLIP_PERMIT = math.pi/8.0   
             #print "Will go to ", new_pan, "; yaw is ", yaw
-            if new_pan < -math.pi-FLIP_PERMIT:
+            if new_pan < -math.pi:
                 yaw=2*math.pi-yaw
                 #print "Cocked because smaller than -pi"
-            if new_pan > math.pi+FLIP_PERMIT:
+            if new_pan > math.pi:
                 yaw=-2*math.pi+yaw
                 #print "Cocked by bigger than pi"
 
